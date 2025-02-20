@@ -9,7 +9,7 @@ from queue import PriorityQueue
 from typing import List, Tuple, Dict
 from functools import cached_property
 
-DEFAUL_DATA = 'data/testing/headway1.json'
+DEFAULT_DATA = 'data/testing/headway1.json'
 
 @dataclass
 class Res:
@@ -45,7 +45,7 @@ class Op:
 	
 	@cached_property
 	def n_prev(self):
-		return len(self.succ)
+		return len(self.prev)
 
 	@cached_property
 	def n_res(self):
@@ -65,6 +65,7 @@ class Instance:
 	ops: List[List[Op]]
 	res_idx: Dict[str, int]
 	n_ops: List[int]
+	total_dur: int
 
 	def __init__(self, json_file):
 		self.parse_json(json_file)
@@ -77,7 +78,8 @@ class Instance:
 
 		self.ops = []
 		self.res_idx = {}
-	
+		self.total_dur = 0
+
 		for train_idx, train_jsn in enumerate(jsn['trains']):
 			train_ops = []
 
@@ -93,6 +95,7 @@ class Instance:
 				)
 
 				op.start_obj = op.start_ub
+				self.total_dur += op.dur
 
 				succ_l.append(op_jsn['successors'])
 
@@ -128,7 +131,7 @@ class Instance:
 				coeff		=obj_jsn.get('coeff', 0),
 				increment	=obj_jsn.get('increment', 0)
 			)
-	
+
 	def calculate_dist(self, train_idx=None):
 		if train_idx is None:
 			for idx in range(self.n_trains):
@@ -184,7 +187,7 @@ class Instance:
 		return len(self.res_idx)
 
 if __name__ == '__main__':
-	data = sys.argv[1] if len(sys.argv) > 1 else DEFAUL_DATA
+	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
 	print(data)
 	inst = Instance(data)
 	for tr in inst.ops:
