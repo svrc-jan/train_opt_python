@@ -40,25 +40,25 @@ class Op:
 	start_obj: int|None = None
 
 	@cached_property
-	def n_succ(self):
+	def n_succ(self) -> int:
 		return len(self.succ)
 	
 	@cached_property
-	def n_prev(self):
+	def n_prev(self) -> int:
 		return len(self.prev)
 
 	@cached_property
-	def n_res(self):
+	def n_res(self) -> int:
 		return len(self.res)
 
 	@cached_property
-	def idx(self):
+	def idx(self) -> int:
 		return (self.train_idx, self.op_idx)
 
-	# def __str__(self):
-	#	 return f'Op({self.train_idx}, {self.op_idx})'
+	def __hash__(self) -> int:
+		return hash(self.idx)
 
-	def __repr__(self):
+	def __repr__(self) -> str:
 		return f'Op({self.train_idx}, {self.op_idx})'
 
 class Instance:
@@ -67,11 +67,11 @@ class Instance:
 	n_ops: List[int]
 	total_dur: int
 
-	def __init__(self, json_file):
+	def __init__(self, json_file: str):
 		self.parse_json(json_file)
 		self.calculate_dist()
 
-	def parse_json(self, json_file):
+	def parse_json(self, json_file: str) -> None:
 		with open(json_file, 'r') as fd:
 			jsn = json.load(fd)
 
@@ -179,11 +179,11 @@ class Instance:
 			
 		
 	@cached_property
-	def n_trains(self):
+	def n_trains(self) -> int:
 		return len(self.ops)
 
 	@cached_property
-	def n_res(self):
+	def n_res(self) -> int:
 		return len(self.res_idx)
 
 if __name__ == '__main__':

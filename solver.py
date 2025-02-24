@@ -5,227 +5,293 @@ import sys
 from typing import List, Tuple, Dict
 from itertools import chain
 from instance import Instance, Op
-from dataclasses import dataclass
-from pyscipopt import Model, quicksum
+from dataclasses import dataclass, field
+from pyscipopt import Model, quicksum, Variable
 
-DEFAUL_DATA = 'data/testing/headway1.json'
+# DEFAUL_DATA = 'data/testing/headway1.json'
+DEFAUL_DATA = 'data/phase1/line1_critical_0.json'
+
 
 @dataclass
 class Res_use:
-    op: Op
-    succ: Op|None
-    time: int
+	op: Op
+	succ: int|None
+	time: int
+	start: int
+	end: int|None
 
-    start: int
-    end: int
 
+@dataclass
 class Res_col:
-    u1: Res_use
-    u2: Res_use
+	res: int
+	op1: Op
+	succ1: Op
+	time1: int
+	op2: Op
+	succ2: Op
+	time2: int
+
+@dataclass
+class Res_order:
+	first: Op
+	second: Op
+	time: int
 
 class Solver:
-    inst: Instance
+	inst: Instance
 
-    def __init__(self, inst):
-        self.inst = inst 
-    
-    def get_res_overlap(self):
-        self.res_op = {}
-        for train_ops in self.inst.ops:
-            for op in train_ops:
-                for res in op.res:
-                    if not res.idx in self.res_op:
-                        self.res_op[res.idx] = []
-                    self.res_op[res.idx].append((op, res.time))
+	def __init__(self, inst):
+		self.inst = inst 
+	
+	def get_res_overlap(self):
+		self.res_op = {}
+		for train_ops in self.inst.ops:
+			for op in train_ops:
+				for res in op.res:
+					if not res.idx in self.res_op:
+						self.res_op[res.idx] = []
+					self.res_op[res.idx].append((op, res.time))
 
-        for v in self.res_op.values():
-            # v.sort(key=lambda op_time: op_time[0].start_obj)
-            pass
+	def get_end_ops(self):
+		return [[op for op in train_ops if op.n_succ == 0] for train_ops in self.inst.ops]
+	
+	def get_start_ops(self):
+		return [[op for op in train_ops if op.n_prev == 0] for train_ops in self.inst.ops]
 
-    def get_end_ops(self):
-        return [[op for op in train_ops if op.n_succ == 0] for train_ops in self.inst.ops]
-    
-    def get_start_ops(self):
-        return [[op for op in train_ops if op.n_prev == 0] for train_ops in self.inst.ops]
+	def make_model_obj(self, m, ops, start):
+		obj = {}
+		obj_c = {}
+		for train_ops in ops:
+			for op in train_ops:
+				if op.obj is not None:
+					obj[op.idx] = m.addVar(name=f'obj{op.idx}', vtype='C', lb=0, ub=None)
+					m.addCons(name=f'obj{op.idx}', 
+						cons=obj[op.idx] >= start[op.idx] - op.obj.threshold)
 
-    def make_model_obj(self, m, ops, start):
-        obj = {}
-        obj_c = {}
-        for train_ops in ops:
-            for op in train_ops:
-                if op.obj is not None:
-                    obj[op.idx] = m.addVar(name=f'obj{op.idx}', vtype='C', lb=0, ub=None)
-                    m.addCons(name=f'obj{op.idx}', 
-                        cons=obj[op.idx] >= start[op.idx] - op.obj.threshold)
+					obj_c[op.idx] = op.obj.coeff
+		
+		m.setObjective(quicksum(obj_c[k]*obj[k] for k in obj.keys()), sense='minimize')
+	
+	def make_forks_model(self):
+		m = Model()
+		m.setProbName('forks')
 
-                    obj_c[op.idx] = op.obj.coeff
-        
-        m.setObjective(quicksum(obj_c[k]*obj[k] for k in obj.keys()), sense='minimize')
+		used = {}
+		start = {}
 
-    def make_forks_model(self):
-        m = Model()
+		omega = self.inst.total_dur
+		
+		for train_ops in self.inst.ops:
+			for op in train_ops:
+				used[op.idx] = m.addVar(name=f'used{op.idx}', vtype='B')
+				start[op.idx] = m.addVar(name=f'start{op.idx}', vtype='C', 
+										 lb=op.start_lb, ub=op.start_ub)
 
-        start = {}
-        used = {}
+				if op.n_prev == 0 or op.n_succ == 0 or op.obj is not None:
+					m.addCons(used[op.idx] == 1)
 
-        omega = self.inst.total_dur
-        
-        for train_ops in self.inst.ops:
-            for op in train_ops:
-                start[op.idx] = m.addVar(name=f'start{op.idx}', vtype='C', 
-                                         lb=op.start_lb, ub=op.start_ub)
-                
-                used[op.idx] = m.addVar(name=f'used{op.idx}', vtype='B')
+			for op in train_ops:
+				if op.n_succ == 1:
+					m.addCons(name=f'cont{op.idx}',
+			   			cons=(used[op.succ[0].idx] >= used[op.idx]))
+					
+				elif op.n_succ > 1:
+					m.addCons(name=f'fork_lb{op.idx}',
+						cons=(quicksum(used[succ.idx] for succ in op.succ) >= used[op.idx]))
+					m.addCons(name=f'fork_ub{op.idx}',
+						cons=(quicksum(used[succ.idx] for succ in op.succ) <= 1))
 
-                if op.n_prev == 0 or op.n_succ == 0 or op.obj is not None:
-                    m.addCons(used[op.idx] == 1)
+				for succ in op.succ:
+					m.addCons(name=f'dur{op.idx},{succ.idx}',
+						cons=start[op.idx] + op.dur <= start[succ.idx] + 
+							omega*(1-used[op.idx] + 1-used[succ.idx]))
 
-        for train_ops in self.inst.ops:
-            for op in train_ops:
-                if op.n_succ > 0:
-                    m.addCons(name=f'fork_lb{op.idx}',
-                        cons=quicksum(used[succ.idx] for succ in op.succ) >= used[op.idx])
-                    m.addCons(name=f'fork_ub{op.idx}',
-                        cons=quicksum(used[succ.idx] for succ in op.succ) <= 1)
+		self.make_model_obj(m, self.inst.ops, start)
 
-                for succ in op.succ:
-                    m.addCons(name=f'dur{op.idx},{succ.idx}',
-                        cons=start[op.idx] + op.dur <= start[succ.idx] + omega*(1-used[succ.idx]))
-    
-        self.make_model_obj(m, self.inst.ops, start)
+		return m, (used, start)
+	
+	def get_paths(self, used_val) -> List[List[Op]]:
+		paths = []
+		for train_ops in self.inst.ops:
+			train_path = []
 
-        return m, (used, start)
-    
-    def solve_forks_model(self):
-        m, (used, start) = self.make_forks_model()
-        
-        m.optimize()
-        
-        used_val = { op.idx: m.getVal(used[op.idx]) for op in chain(*self.inst.ops)}
-        start_val = { op.idx: m.getVal(start[op.idx]) for op in chain(*self.inst.ops)}
+			op = train_ops[0]
+			train_path.append(op)
 
-        return used_val, start_val
+			while op.n_succ > 0:
+				op = train_path[-1]
+				
+				succ = [x for x in op.succ if used_val[x.idx] == 1]
 
-    def get_paths(self, used) -> List[List[Op]]:
-        paths = []
-        for train_ops in self.inst.ops:
-            train_path = []
+				assert(len(succ) == 1)
 
-            op = train_ops[0]
-            train_path.append(op)
+				op = succ[0]
+				train_path.append(op)
 
-            while op.n_succ > 0:
-                op = train_path[-1]
-                
-                succ = [x for x in op.succ if used[x.idx] == 1]
+			paths.append(train_path)
 
-                op = succ[0]
-                train_path.append(op)
+		return paths
+	
 
-            paths.append(train_path)
+	def get_collisions(self, paths, start_val):
+		res_uses = {}
 
-        return paths
-    
+		for path in paths:
+			for op, succ in zip(path, path[1:] + [None]):
+				for res in op.res:
+					if not res.idx in res_uses:
+						res_uses[res.idx] = []
 
-    def get_collisions(self, paths, start):
-        res_uses = {}
+					res_uses[res.idx].append(Res_use(
+						op=op,
+						succ=succ if succ else None,
+						time=res.time,
+						start=start_val[op.idx],
+						end=start_val[succ.idx] + res.time if succ else None
+					))
 
-        for path in paths:
-            for op, succ in zip(path, path[1:] + [None]):
-                for res in op.res:
-                    if not res.idx in res_uses:
-                        res_uses[res.idx] = []
-
-                    res_uses[res.idx].append(Res_use(
-                        op=op,
-                        succ=succ if succ else None,
-                        time=res.time,
-                        start=start[op.idx],
-                        end=start[succ.idx] + res.time if succ else None,
-                    ))
-
-        collisions = []
-        for res, uses in res_uses.items():
-            for i, u1 in enumerate(uses):
-                for u2 in uses[i+1:]:
-                    if u1.start < u2.end and u2.start < u1.end:
-                        collisions.append((u1, u2))
+		collisions = []
+		for res, uses in res_uses.items():
+			for i, u1 in enumerate(uses):
+				for u2 in uses[i+1:]:
+					if u1.start < u2.end and u2.start < u1.end:
+						collisions.append(Res_col(
+							res=res,
+							op1=u1.op,
+							succ1=u1.succ,
+							time1=u1.time,
+							op2=u2.op,
+							succ2=u2.succ,
+							time2=u2.time
+						))
 
 
-        return collisions
+		return collisions
 
-    def make_res_model(self, paths: List[List[Op]], 
-        collisions: List[Tuple[Res_use, Res_use]]):
+	def make_collisions_model(self, paths: List[List[Op]], collisions: List[Res_col]):
+		m = Model()
+		m.setProbName('collisions')
 
-        omega = self.inst.total_dur
+		order = {}
+		start = {}
 
-        m = Model()
+		omega = self.inst.total_dur
+		
+		for path in paths:
+			for op in path:
+				start[op.idx] = m.addVar(name=f'start{op.idx}', vtype='C', 
+										 lb=op.start_lb, ub=op.start_ub)
+				
+			for op, succ in zip(path[:-1], path[1:]):
+				m.addCons(name=f'dur{op.idx},{succ.idx}',
+					cons=start[op.idx] + op.dur <= start[succ.idx])
+				
+		for c in collisions:
+			k1 = (c.res, c.op1.idx, c.op2.idx)
+			k2 = (c.res, c.op2.idx, c.op1.idx)
 
-        start = {}
-        res = {}
-        
-        for path in paths:
-            for op in path:
-                start[op.idx] = m.addVar(name=f'start{op.idx}', 
-                    vtype='C', lb=op.start_lb, ub=op.start_ub)
-                
-        for path in paths:
-            for op, succ in zip(path[:-1], path[1:]):
-                m.addCons(name=f'dur{op.idx},{succ.idx}', cons=start[op.idx] + op.dur <= start[succ.idx])
+			order[k1] = m.addVar(name=f'order{c.res},{c.op1.idx},{c.op2.idx}', vtype='B')
+			order[k2] = m.addVar(name=f'order{c.res},{c.op2.idx},{c.op1.idx}', vtype='B')
 
-        for u1, u2 in collisions:
-            # u1 -> u2 : succ1 + time1 < op2
-            # u2 -> u1 : succ2 + time2 < op1
+			m.addCons(name=f'order{c.res},{c.op1.idx},{c.op2.idx}',
+				cons=start[c.succ1.idx] + c.time1 <= start[c.op2.idx] + omega*(1-order[k1]))
+			
+			m.addCons(name=f'order{c.res},{c.op2.idx},{c.op1.idx}',
+				cons=start[c.succ2.idx] + c.time2 <= start[c.op1.idx] + omega*(1-order[k2]))
+			
+			m.addCons(order[k1] + order[k2] == 1)
 
-            if u2.succ is None:
-                m.addCons(start[u1.succ.idx] + u1.time <= start[u2.op.idx])
-            elif u2.succ is None:
-                m.addCons(start[u2.succ.idx] + u2.time <= start[u1.op.idx])
-            else:
-                res[(u1.succ.idx, u2.op.idx)] = m.addVar(name=f'order{u1.succ.idx},{u2.op.idx}', vtype='B')
-                res[(u2.succ.idx, u1.op.idx)] = m.addVar(name=f'order{u2.succ.idx},{u1.op.idx}', vtype='B')
+		self.make_model_obj(m, paths, start)
 
-                m.addCons(name=f'order{u1.succ.idx},{u2.op.idx}',
-                    cons=start[u1.succ.idx] + u1.time <= start[u2.op.idx] + 
-                        omega*(1 - res[(u1.succ.idx, u2.op.idx)]))
-                
-                m.addCons(name=f'order{u1.succ.idx},{u2.op.idx}',
-                    cons=start[u2.succ.idx] + u2.time <= start[u1.op.idx] + 
-                        omega*(1 - res[(u2.succ.idx, u1.op.idx)]))
+		return m, (order, start)
+	
+	def get_orders_from_collisions(self, collisions: List[Res_col], order_val):
+		res_orders = []
 
-                # m.addCons(res[(u1.succ.idx, u2.op.idx)] + res[(u1.succ.idx, u2.op.idx)] == 1)
-        
-        self.make_model_obj(m, paths, start)
+		for c in collisions:
+			k1 = (c.res, c.op1.idx, c.op2.idx)
+			k2 = (c.res, c.op2.idx, c.op1.idx)
 
-        return m, (res, start)
+			assert(order_val[k1] == 1 or order_val[k2] == 1)
+			if order_val[k1] == 1:
+				res_orders.append(Res_order(
+					first=c.op1,
+					second=c.op2,
+					time=c.time1
+				))
+			else:
+				res_orders.append(Res_order(
+					first=c.op2,
+					second=c.op1,
+					time=c.time2
+				))
 
-    def solve_res_model(self, used, start):
-        paths = self.get_paths(used)
-        collisions = self.get_collisions(paths, start)
+		return res_orders
+		
+	def add_orders_to_forks_model(self, m_f, used, start, orders: List[Res_order]):
+		omega = self.inst.total_dur
 
-        m, (res, start) = self.make_res_model(paths, collisions)
-        
-        m.writeProblem()
-        m.optimize()
-        
-        # res_val = { op.idx: m.getVal(res[op.idx]) for op in chain(*paths)}
-        res_val = {}
-        start_val = { op.idx: m.getVal(start[op.idx]) for op in chain(*paths)}
-        
+		for o in orders:
+			for succ in o.first.succ:
+				m_f.addCons(name=f'order{succ.idx},{o.second}',
+					cons=start[succ.idx] + o.time <= start[o.second.idx])
+					#   + 
+					# 	omega*(3 - used[o.first.idx] - used[o.second.idx] - used[succ.idx]))
+			
+	def add_orders_to_collisions_model(self, m_c, used_val, start, orders: List[Res_order]):
+		omega = self.inst.total_dur
 
-        return res_val, start_val
-        
+		for o in orders:
+			for succ in o.first.succ:
+				if used_val[o.first.idx] == 0 or used_val[o.second.idx] == 0:
+					continue
+
+				succ = [x for x in o.first.succ if used_val[x.idx] == 1][0]
+
+				m_c.addCons(name=f'order{succ.idx},{o.second}',
+					cons=start[succ.idx] + o.time <= start[o.second.idx])
+
+	def solve(self):
+		res_orders = []
+
+		while True:
+			m_f, (used, start) = self.make_forks_model()
+			self.add_orders_to_forks_model(m_f, used, start, res_orders)
+
+			m_f.writeProblem()
+			# m_f.hideOutput()
+			m_f.optimize()
+			assert(m_f.getStatus() == 'optimal')
+			print('forks', m_f.getObjVal())
+
+			used_val = { k: int(round(m_f.getVal(v))) for k, v in used.items() }
+			start_val = { k: int(round(m_f.getVal(v))) for k, v in start.items() }
+
+			paths = self.get_paths(used_val)
+			collisions = self.get_collisions(paths, start_val)
+			if len(collisions) == 0:
+				break
+
+			m_c, (order, start_c) = self.make_collisions_model(paths, collisions)
+			self.add_orders_to_collisions_model(m_c, used_val, start_c, res_orders)
+
+			# m_c.hideOutput()
+			m_c.optimize()
+			assert(m_c.getStatus() == 'optimal')
+			print('res', m_c.getObjVal())
+			
+			order_val = { k: int(round(m_c.getVal(v))) for k, v in order.items() }
+			new_res_orders = self.get_orders_from_collisions(collisions, order_val)
+			res_orders.extend(new_res_orders)
 
 if __name__ == '__main__':
-    inst = Instance(sys.argv[1] if len(sys.argv) > 1 else DEFAUL_DATA)
-    sol = Solver(inst)
-    sol.get_res_overlap()
-    used, start = sol.solve_forks_model()
-    res, start = sol.solve_res_model(used, start)
+	inst = Instance(sys.argv[1] if len(sys.argv) > 1 else DEFAUL_DATA)
+	sol = Solver(inst)
+	sol.solve()
 
-    # for op in sol.get_start_ops():
-    #     print(op)
+	# for op in sol.get_start_ops():
+	#	 print(op)
 
-    
-    # for op in sol.get_end_ops():
-    #     print(op)
+	
+	# for op in sol.get_end_ops():
+	#	 print(op)
