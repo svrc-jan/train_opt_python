@@ -64,6 +64,7 @@ class Op:
 class Instance:
 	ops: List[List[Op]]
 	res_idx: Dict[str, int]
+	res_ops: Dict[str, List[Op]]
 	n_ops: List[int]
 	total_dur: int
 
@@ -78,6 +79,7 @@ class Instance:
 
 		self.ops = []
 		self.res_idx = {}
+		self.res_ops = {}
 		self.total_dur = 0
 
 		for train_idx, train_jsn in enumerate(jsn['trains']):
@@ -110,6 +112,11 @@ class Instance:
 						res_idx = self.res_idx[res_name]
 
 					op.res.append(Res(res_idx, res_time))
+					
+					if not res_idx in self.res_ops:
+						self.res_ops[res_idx] = []
+
+					self.res_ops[res_idx].append(op)
 
 				train_ops.append(op)
 
