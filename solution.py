@@ -22,7 +22,6 @@ Values = Dict[Tuple[int, int], int]
 @dataclass
 class Res_use:
 	op: Op
-	succ: Op|None
 	time: int
 
 class Solution:
@@ -86,7 +85,7 @@ class Solution:
 
 	@staticmethod
 	def make_ops_var(m: Model, ops: List[Op], var_name: str='s', force_use=True, var=None) -> Var:
-		assert(var_name in ['s', 'u'])
+		assert(var_name in ['s', 'u', 'e'])
 
 		if var is None:
 			var = {}
@@ -94,6 +93,10 @@ class Solution:
 		for op in ops:
 			if var_name == 's':
 				var[op] = m.addVar(name=f's{op.idx}', vtype='C', lb=op.start_lb, ub=op.start_ub)
+			
+			elif var_name == 'e':
+				var[op] = m.addVar(name=f'e{op.idx}', vtype='C', lb=0, ub=None)
+			
 			elif var_name == 'u':
 				var[op] = m.addVar(name=f'u{op.idx}', vtype='B')
 				if force_use and (op.n_prev == 0 or op.n_succ == 0 or op.obj):
@@ -101,8 +104,14 @@ class Solution:
 
 		return var
 
+	@staticmethod
+	def make_dur_cons(m: Model, s: Var, e: Var, op: Op) -> Constraint:
+		cons = s[op] + op.dur <= e[op]
+		
+		return m.addCons(name=f'dur{op.idx}', cons=cons)
 
-	def make_fork_cons(self, m: Model, u: Var, s: Var, op: Op) -> List[Constraint]:
+
+	def make_fork_cons(self, m: Model, u: Var, s: Var, e: Var, op: Op) -> List[Constraint]:
 		rv = []
 
 		# if op.n_succ == 1:
@@ -124,36 +133,41 @@ class Solution:
 				cons = u[op] <= u[succ]
 	
 			rv.append(m.addCons(name=f'cont{op.idx}', cons=cons))
+
+			cons = e[op] == s[succ]
+			rv.append(m.addCons(name=f'end{op.idx}', cons=cons))
 	
 		
 		elif op.n_succ > 1:
-			cons_lb = quicksum(u[succ] for succ in op.succ) >= u[op]
-			cons_ub = quicksum(u[succ] for succ in op.succ) <= 1
+			succ_vars = [u[succ] for succ in op.succ]
+			rv.append(m.addConsSOS1(name='cont_sos', vars=succ_vars))
+			rv.append(m.addCons(name='cont_sum', cons=quicksum(succ_vars) >= u[op]))
+			
 
-			rv.append(m.addCons(name=f'fork_lb{op.idx}', cons=cons_lb))
-			rv.append(m.addCons(name=f'fork_ub{op.idx}', cons=cons_ub))
+			for succ in op.succ:
+				cons1 = e[op] <= s[succ]
+				cons2 = e[op] >= s[succ]
+				
+				rv.append(m.addConsIndicator(name=f'end1{op.idx}{succ.idx}', cons=cons1, binvar=u[succ]))
+				rv.append(m.addConsIndicator(name=f'end2{op.idx}{succ.idx}', cons=cons2, binvar=u[succ]))
 
-		for succ in op.succ:
-			cons = s[op] + op.dur <= s[succ]
-
-			rv.append(m.addConsIndicator(name=f'dur{op.idx},{succ.idx}', 
-				cons=cons, binvar=model_and(m, [u[op], u[succ]])))
 
 		return rv
-	
 
 	def make_forks_model(self):
 		m = Model()
 
 		u = self.make_ops_var(m, itertools.chain(*self.inst.ops), 'u')
 		s = self.make_ops_var(m, itertools.chain(*self.inst.ops), 's')
+		e = self.make_ops_var(m, itertools.chain(*self.inst.ops), 'e')
 		
 		for op in itertools.chain(*self.inst.ops):
-			self.make_fork_cons(m, u, s, op)
+			self.make_dur_cons(m, s, e, op)
+			self.make_fork_cons(m, u, s, e, op)
 
 		self.make_col_obj(m, u)
 
-		return m, (u, s)
+		return m, (u, s, e)
 
 
 	def make_path(self, u: Values, train: int|None=None) -> List[Op]|List[List[Op]]:
@@ -184,54 +198,40 @@ class Solution:
 			yield path[i], path[i+1]
 
 	def make_res_uses(self, path: List, res_uses: Dict[int, List[Res_use]]):
-		for op, succ in self.get_transitions(path):
+		for op in path:
 			for res in op.res:
 				if not res.idx in res_uses:
 					res_uses[res.idx] = []
 
 				res_uses[res.idx].append(Res_use(
 					op=op,
-					succ=succ,
 					time=res.time
 				))
 
 
-	def sort_res_uses(self, s: Values, res_uses: Dict[int, List[Res_use]]|None=None):
+	def sort_res_uses(self, s: Values, e: Values, res_uses: Dict[int, List[Res_use]]|None=None):
 		if res_uses is None:
 			res_uses = self.res_uses
 
-		def res_use_cmp(x: Res_use, y: Res_use):
-			assert(not (x.succ is None and y.succ is None))
-			if x.succ is None:
-				return False
-			
-			if y.succ is None:
-				return True
-			
-			if s[x.op] == s[y.op]:
-				return s[x.succ] < s[y.succ]
-			
-			return s[x.op] < s[y.op]
-
 		for v in res_uses.values():
-			v.sort(key=cmp_to_key(res_use_cmp))
+			v.sort(key=lambda u: (s[u.op], e[u.op]))
 
 	@staticmethod
-	def make_path_cons(m: Model, s: Var, path: List[Op]):
+	def make_path_cons(m: Model, s: Var, e: Var, path: List[Op]):
 		rv = []
 
 		for op, succ in zip(path[:-1], path[1:]):
-			cons = s[op] + op.dur <= s[succ]
-			rv.append(m.addCons(name=f'dur{op.idx}', cons=cons))
+			cons = e[op] == s[succ]
+			rv.append(m.addCons(name=f'end{op.idx}', cons=cons))
 
 		return rv
 
 	@staticmethod
-	def make_res_use_cons(m: Model, s: Var, res_uses: List[Res_use]):
+	def make_res_use_cons(m: Model, s: Var, e: Var, res_uses: List[Res_use]):
 		rv = []
 
 		for first, second in zip(res_uses[:-1], res_uses[1:]):
-			cons = s[first.succ] + first.time <= s[second.op]
+			cons = e[first.op] + first.time <= s[second.op]
 			rv.append(m.addCons(name=f'r{first.op.idx},{second.op.idx}',cons=cons))
 
 		return rv
@@ -239,76 +239,90 @@ class Solution:
 	def make_base_model(self):
 		m = Model()
 		
-		s = self.make_ops_var(m, itertools.chain(*self.paths))
+		s = self.make_ops_var(m, itertools.chain(*self.paths), 's')
+		e = self.make_ops_var(m, itertools.chain(*self.paths), 'e')
+
+		for op in itertools.chain(*self.paths):
+			self.make_dur_cons(m, s, e, op)
 
 		for p in self.paths:
-			self.make_path_cons(m, s, p)
+			self.make_path_cons(m, s, e, p)
 
 		for ru in self.res_uses.values():
-			self.make_res_use_cons(m, s, ru)
+			# continue
+			self.make_res_use_cons(m, s, e, ru)
 
 		self.make_obj(m, s)
 
-		return m, s
+		return m, (s, e)
 	
 	def get_fork_sol(self):
-		mf, (u, s) = self.make_forks_model()
+		mf, (u, s, e) = self.make_forks_model()
 		
-		# mf.hideOutput()
+		mf.hideOutput()
 		print('forks - optimizing')
-		mf.setParam('presolving/maxrounds', 20)
-		mf.setParam('limits/stallnodes', 1000)
+		# mf.setParam('presolving/maxrounds', 20)
+		# mf.setParam('limits/stallnodes', 1000)
+
+		# mf.writeProblem()
 
 		mf.optimize()
 		print('forks', mf.getObjVal())
 
-		u_v, s_v = self.get_values(mf, (u, s))
+		u_v, s_v, e_v = self.get_values(mf, (u, s, e))
+
+		# for k in u_v:
+		# 	print(k, s_v[k], e_v[k], '' if u_v[k] == 1 else ' - unused')
 
 		self.paths = self.make_path(u_v)
 		self.res_uses = {}
 		for p in self.paths:
 			self.make_res_uses(p, self.res_uses)
-		self.sort_res_uses(s_v)
+		self.sort_res_uses(s_v, e_v)
 
 
 	def get_base_sol(self):
 
-		mb, _ = self.make_base_model()
+		mb, (s, e) = self.make_base_model()
 
-		mb.hideOutput()
+		# mb.hideOutput()
 		print('base - optimizing')
+		# mb.writeProblem()
 		mb.optimize()
 		print('base', mb.getObjVal())
-
 		self.obj_val = mb.getObjVal()
 		
+		# s_v, e_v = self.get_values(mb, (s, e))
 
-	def make_res_improve_cons(self, m: Model, u: Var, s: Var, r: Var,
+		# for k in s_v:
+		# 	print(k, s_v[k], e_v[k])
+
+		
+
+	def make_res_improve_cons(self, m: Model, u: Var, s: Var, e: Var, r: Var,
 						   	  res_uses: Dict[int, List[Res_use]], op: Op):
 		
 		for res in op.res:
-			if not res.idx in res_uses:
+			if not res.idx in res_uses or len(res_uses[res.idx]) == 0:
 				continue
 
 			choices = []
 			for i, (first, second) in enumerate(zip([None] + res_uses[res.idx], res_uses[res.idx] + [None])):
-				k = (res.idx, op.idx, i) 
-				r[k] = m.addVar(name=f'r{res.idx},{op.idx},{i}', vtype='B')
-				choices.append(r[k])
+				
+				var = m.addVar(name=f'r{res.idx},{op.idx},{i}', vtype='B')
+				r[res.idx, op.idx, i] = var
+				choices.append(var)
 
 				if first:
-					cons = s[first.succ] + first.time <= s[op]
-					
-					m.addConsIndicator(name=f'r{first.op.idx},{op.idx}', cons=cons, binvar=r[k])
+					cons = e[first.op] + first.time <= s[op]
+					m.addConsIndicator(name=f'r1_{res.idx},{first.op.idx},{op.idx}', cons=cons, binvar=var)
 
 				if second:
-					for succ in op.succ:
-						cons = s[succ] + res.time <= s[second.op]
-
-						m.addConsIndicator(name=f'r{op.idx},{second.op.idx},{i}', cons=cons, binvar=r[k])
+					cons = e[op] + res.time <= s[second.op]
+					m.addConsIndicator(name=f'r2_{res.idx},{op.idx},{second.op.idx}', cons=cons, binvar=var)
 				
-				cons = quicksum(choices) == u[op]
-				m.addCons(name=f'ch{op.idx},{res.idx}', cons=cons)
+			m.addCons(name=f'ch{op.idx},{res.idx}', cons=quicksum(choices) == u[op])
+			# m.addConsSOS1(name='ch_sos', vars=choices)
 	
 
 	def get_filtered_res_uses(self, train: int):
@@ -324,6 +338,7 @@ class Solution:
 		
 		u = {}
 		s = {}
+		e = {}
 		r = {}
 
 		for i, p in enumerate(self.paths):
@@ -331,36 +346,48 @@ class Solution:
 				continue
 
 			self.make_ops_var(m, p, 's', var=s)
-			self.make_path_cons(m, s, p)
+			self.make_ops_var(m, p, 'e', var=e)
 
-		
+			for op in p:
+				self.make_dur_cons(m, s, e, op)
+
+			self.make_path_cons(m, s, e, p)
 
 		for ru in res_uses.values():
-			self.make_res_use_cons(m, s, ru)
+			self.make_res_use_cons(m, s, e, ru)
 
 		self.make_ops_var(m, self.inst.ops[train], 's', var=s)
+		self.make_ops_var(m, self.inst.ops[train], 'e', var=e)
 		self.make_ops_var(m, self.inst.ops[train], 'u', var=u)
 
 		for op in self.inst.ops[train]:
-			self.make_fork_cons(m, u, s, op)
-			self.make_res_improve_cons(m, u, s, r, res_uses, op)
+			self.make_dur_cons(m, s, e, op)
+			self.make_fork_cons(m=m, u=u, s=s, e=e, op=op)
+			self.make_res_improve_cons(m=m, u=u, s=s, e=e, r=r, 
+							  		   res_uses=res_uses, op=op)
 
 		self.make_obj(m, s)
 
-		return m, (u, s, r)
+		return m, (u, s, e, r)
 	
 
 	def get_improve_sol(self, train: int):
 		filt_res_uses = self.get_filtered_res_uses(train)
-		m, (u, s, r) = self.make_improve_model(train, filt_res_uses)
+		m, (u, s, e, r) = self.make_improve_model(train, filt_res_uses)
 
 		m.hideOutput()
 		print(f'impr {train} - optimizing')
 		m.setParam('limits/stallnodes', 1000)
+		m.writeProblem()
 		m.optimize()
 		print(f'impr {train}', m.getObjVal())
+		# print(filt_res_uses)
 
-		u_v, s_v = sol.get_values(m, (u, s))
+		u_v, s_v, e_v, r_v = self.get_values(m, (u, s, e, r))
+
+		# for k, v in r_v.items():
+		# 	if u_v[self.inst.ops[k[1][0]][k[1][1]]] == 1:
+		# 		print(k, v)
 
 		new_path = self.make_path(u_v, train)
 
@@ -369,9 +396,9 @@ class Solution:
 		imp_res_uses = {}
 		for p in imp_paths:
 			self.make_res_uses(p, imp_res_uses)
-		self.sort_res_uses(s_v, imp_res_uses)
+		self.sort_res_uses(s_v, e_v, imp_res_uses)
 		
-		imp_sol = Solution(self.inst, imp_paths, imp_res_uses)
+		imp_sol = Solution(self.inst, imp_paths, imp_res_uses, m.getObjVal())
 	
 		# print('old path', self.paths[train])
 		# print('new path', new_path)
@@ -385,17 +412,17 @@ if __name__ == '__main__':
 	sol = Solution(inst)
 
 	
-	while True:
-		best = sol
-		for tr in range(inst.n_trains):
-			ns = sol.get_improve_sol(tr)
-			if ns.obj_val < best.obj_val:
-				best = ns
+	# while True:
+	# 	best = sol
+	for tr in range(inst.n_trains):
+		ns = sol.get_improve_sol(tr)
+	# 		if ns.obj_val < best.obj_val:
+	# 			best = ns
 		
-		if best.obj_val >= sol.obj_val:
-			break
+	# 	if best.obj_val >= sol.obj_val:
+	# 		break
 		
-		sol = best
+	# 	sol = best
 			
 
 
