@@ -204,7 +204,7 @@ class Instance:
 	
 	@cached_property
 	def avg_dur(self) -> float:
-		return self.total_dur/self.n_ops
+		return self.total_dur/sum(self.n_ops)
 	
 
 if __name__ == '__main__':
