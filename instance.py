@@ -16,11 +16,13 @@ class Res:
 	idx: int
 	time: int
 
+
 @dataclass
 class Obj:
 	threshold: int	= 0
 	coeff: int		= 0
 	increment: int	= 0
+
 
 @dataclass
 class Op:
@@ -61,10 +63,17 @@ class Op:
 	def __repr__(self) -> str:
 		return f'Op({self.train_idx}, {self.op_idx})'
 
+
+@dataclass
+class Res_use:
+	op: Op
+	time: int
+
+
 class Instance:
 	ops: List[List[Op]]
 	res_idx: Dict[str, int]
-	res_ops: Dict[str, List[Op]]
+	res_uses: Dict[int, List[Res_use]]
 	n_ops: List[int]
 	total_dur: int
 
@@ -79,7 +88,7 @@ class Instance:
 
 		self.ops = []
 		self.res_idx = {}
-		self.res_ops = {}
+		self.res_uses = {}
 		self.total_dur = 0
 
 		for train_idx, train_jsn in enumerate(jsn['trains']):
@@ -113,10 +122,10 @@ class Instance:
 
 					op.res.append(Res(res_idx, res_time))
 					
-					if not res_idx in self.res_ops:
-						self.res_ops[res_idx] = []
+					if not res_idx in self.res_uses:
+						self.res_uses[res_idx] = []
 
-					self.res_ops[res_idx].append(op)
+					self.res_uses[res_idx].append(Res_use(op=op, time=res_time))
 
 				train_ops.append(op)
 
@@ -192,6 +201,11 @@ class Instance:
 	@cached_property
 	def n_res(self) -> int:
 		return len(self.res_idx)
+	
+	@cached_property
+	def avg_dur(self) -> float:
+		return self.total_dur/self.n_ops
+	
 
 if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
