@@ -11,8 +11,8 @@ from instance import Instance, Op, Res_use
 from dataclasses import dataclass, field
 
 
-# DEFAUL_DATA = 'data/testing/headway1.json'
-DEFAUL_DATA = 'data/phase1/line1_critical_0.json'
+DEFAUL_DATA = 'data/testing/headway1.json'
+# DEFAUL_DATA = 'data/phase1/line1_critical_0.json'
 
 class Res_conshdlr(scip.Conshdlr):
 	pass
@@ -57,13 +57,11 @@ class Solver:
 		f = m.data['f']
 
 		s[op] = m.addVar(name=f's{op}', vtype='C', lb=op.start_lb, ub=op.start_ub)
-		e[op] = m.addVar(name=f'e{op}', vtype='C', lb=0, ub=None)
 		o[op] = m.addVar(name=f'e{op}', vtype='C', lb=0, ub=None)
 
 		for succ in op.succ:
 			# vtype = 'B' if op.n_succ > 1 else 'C'
-			vtype = 'C'
-			f[op, succ] = m.addVar(name=f'f{op},{succ}', vtype=vtype, lb=0, ub=1)
+			f[op, succ] = m.addVar(name=f'f{op},{succ}', vtype='C', lb=0, ub=1)
 
 	@staticmethod
 	def make_dur_cons(m, op: Op):
@@ -72,6 +70,7 @@ class Solver:
 
 		cons = s[op] + op.dur <= e[op]
 		m.addCons(name=f'dur{op}', cons=cons)
+		
 
 	@staticmethod
 	def make_end_cons(m, op: Op):
@@ -90,6 +89,14 @@ class Solver:
 
 		elif op.n_succ > 1:
 			for succ in op.succ:
+				
+
+				frac = succ.frac_flow
+				aux = m.addVar(name=f'end_aux{op},{succ}', vtype='C', lb=0, ub=1)
+				
+				aux_cons = aux <= frac - f[op, succ]
+
+
 				cons1 = e[op] <= s[succ] + M*(1 - f[op, succ])
 				cons2 = e[op] >= s[succ] - M*(1 - f[op, succ])
 
@@ -101,6 +108,7 @@ class Solver:
 
 				cons_o = cons=o[op] + 1 <= o[succ]
 				m.addCons(name=f'ord{op},{succ}', cons=cons_o)
+
 
 	@staticmethod
 	def make_flow_cons(m, op):
@@ -148,8 +156,8 @@ class Solver:
 		for op in it.chain(*self.inst.ops):
 			self.make_dur_cons(m, op)
 
-		for op in it.chain(*self.inst.ops):
-			self.make_end_cons(m, op)
+		# for op in it.chain(*self.inst.ops):
+		# 	self.make_end_cons(m, op)
 	
 		for op in it.chain(*self.inst.ops):
 			self.make_flow_cons(m, op)
@@ -190,6 +198,12 @@ class Solver:
 		m.freeTransform()
 		for k in keys:
 			fix_cons[k] = m.addCons(name=f'fix_{var},{k}', cons=(m.data[var][k] == 1))
+
+	@staticmethod
+	def set_var_to_binary(m, var, keys):
+		m.freeTransform()
+		for k in keys:
+			m.chgVarType(m.data[var][k], vtype='B')
 
 	@staticmethod
 	def optim_obj1(m):
@@ -259,17 +273,36 @@ class Solver:
 				if op1.train_idx == op2.train_idx:
 					continue
 				
-				v1 = m.addVar(name=f'r{res},{op1},{op2}', vtype='C', lb=0, ub=1)
-				v2 = m.addVar(name=f'r{res},{op2},{op1}', vtype='C', lb=0, ub=1)
+				if op1.n_succ == 0 or op2.n_succ == 0:
+					continue
 
-				r[res, op1, op2] = v1
-				r[res, op2, op1] = v2
+				vars1 = []
+				vars2 = []
 
-				use_op1 = scip.quicksum(f[prev1, op1] for prev1 in op1.prev) if op1.n_prev > 0 else 1
-				use_op2 = scip.quicksum(f[prev2, op2] for prev2 in op2.prev) if op2.n_prev > 0 else 1
+				for succ1 in op1.succ:
+					v1 = m.addVar(name=f'r{res},{op1},{succ1},{op2}', vtype='C', lb=0, ub=1)
+					
+					r[res, op1, succ1, op2] = v1
+					vars1.append(v1)
 
-				cons = 2*(v1 + v2) == use_op1 + use_op2
-				m.addCons(name=f'ch{res},{op1},{op2}', cons=cons)
+				for succ2 in op2.succ:
+					v2 = m.addVar(name=f'r{res},{op2},{succ2},{op1}', vtype='C', lb=0, ub=1)
+					
+					r[res, op2, succ2, op1] = v2
+					vars2.append(v2)
+
+
+				use_op1 = scip.quicksum(f[op1, succ1] for succ1 in op1.succ)
+				use_op2 = scip.quicksum(f[op2, succ2] for succ2 in op2.succ)
+
+				for v1, succ1 in zip(vars1, op1.succ):
+					cons = 2.0*(v1 + scip.quicksum(vars2)) == f[op1, succ1] + use_op2
+					m.addCons(name=f'ch{res},{op1},{succ1},{op2}', cons=cons)
+
+				for v2, succ2 in zip(vars2, op2.succ):
+					cons = 2.0*(v2 + scip.quicksum(vars1)) == f[op2, succ2] + use_op1
+					m.addCons(name=f'ch{res},{op2},{succ2},{op1}', cons=cons) 
+
 
 	def make_res_cons(self, m, s_val=None, mult=1):
 		m.freeTransform()
@@ -277,15 +310,13 @@ class Solver:
 		if 'res_conss' in m.data:
 			for cons in m.data['res_conss']:
 				m.delCons(cons)
-		
-			m.data['res_conss'].clear()
 
-		else:
-			m.data['res_conss'] = []
+		m.data['res_conss'] = []
 
 		s = m.data['s']
-		e = m.data['e']
+		# e = m.data['e']
 		o = m.data['o']
+		f = m.data['f']
 		r = m.data['r']
 
 		res_conss = m.data['res_conss']
@@ -299,25 +330,36 @@ class Solver:
 				if op1.train_idx == op2.train_idx:
 					continue
 
+				assert(op1.n_succ > 0 or op2.n_succ > 0)
+
 				if s_val:
 					M = mult*(abs(s_val[op1] - s_val[op2]) + op1.dur + op2.dur)
 				else:
 					M = mult*self.inst.avg_dur
 
-				v1 = r[res, op1, op2]
-				v2 = r[res, op2, op1]
+				if op1.n_succ == 0:
+					for succ2 in op2.succ:
+						cons = s[succ2] + u2.time <= s[op1] + M*(1 - f[op2, succ2])
+						res_conss.append(m.addCons(name=f'res{res},{op2},{succ2},{op2}', cons=cons))
 
-				cons1 = e[op1] + u1.time <= s[op2] + M*(1 - v1)
-				cons2 = e[op2] + u2.time <= s[op1] + M*(1 - v2)
+				elif op2.n_succ == 0:
+					for succ1 in op1.succ:
+						cons = s[succ1] + u1.time <= s[op2] + M*(1 - f[op1, succ1])
+						res_conss.append(m.addCons(name=f'res{res},{op1},{succ1},{op2}', cons=cons))
+					
+				else:
+					for succ1 in op1.succ:
+						v = r[res, op1, succ1, op2]
 
-				res_conss.append(m.addCons(name=f'res{res},{op1},{op2}', cons=cons1))
-				res_conss.append(m.addCons(name=f'res{res},{op2},{op1}', cons=cons2))
+						cons = s[succ1] + u1.time <= s[op2] + M*(1 - v)
+						res_conss.append(m.addCons(name=f'res{res},{op1},{succ1},{op2}', cons=cons))
 
-				cons1 = o[op1] + 1 <= o[op2] + mult*(1 - v1)
-				cons2 = o[op2] + 1 <= o[op1] + mult*(1 - v2)
+					for succ2 in op2.succ:
+						v = r[res, op2, succ2, op1]
 
-				res_conss.append(m.addCons(name=f'res_ord{res},{op1},{op2}', cons=cons1))
-				res_conss.append(m.addCons(name=f'res_ord{res},{op2},{op1}', cons=cons2))
+						cons = s[succ2] + u2.time <= s[op1] + M*(1 - v)
+						res_conss.append(m.addCons(name=f'res{res},{op2},{succ2},{op2}', cons=cons))
+
 
 	def solve(self):
 		m = self.make_init_model()
@@ -335,57 +377,43 @@ class Solver:
 				z1 = self.optim_obj1(m)
 				# z2 = self.optim_obj2(m)
 				
-				if m.getStatus() == 'optimal':
+				if m.getStatus() == 'optimal' :
 					break
 				
 				mult = 1.5*mult
 
-			non_bin_f = self.find_non_bin_var(m, 'f')
-			if len(non_bin_f) > 0:
-				self.fix_var_to_one(m, 'f', non_bin_f[:1])
-				print('f', i, mult, z1)
-
-			else:
-				non_bin_r = self.find_non_bin_var(m, 'r')
-				if len(non_bin_r) == 0:
-					break
-
-				self.fix_var_to_one(m, 'r', non_bin_r[:1])
-				print('r', i, mult, z1)
 
 			s_val = self.get_values(m, 's')
+			non_bin = self.find_non_bin_var(m, 'r')
+			if len(non_bin) > 0:
+				self.fix_var_to_one(m, 'r', non_bin[:1])
+				print('r', i, mult, z1)
+
+			else:
+				break
+
+			
 			
 			i += 1
 
+		i = 0
 
+		non_bin_r = self.find_non_bin_var(m, 'r')
+		self.make_res_cons(m, s_val, mult=10)
+		m.hideOutput(quiet=False)
 
-		
-		s_val = self.get_values(m, 's')
-		f_val = self.get_values(m, 'f')
-		r_val = self.get_values(m, 'r')
+		while True:
+			if len(non_bin_r) > 0:
+				self.set_var_to_binary(m, 'r', non_bin_r)
 
-		for res, uses in self.inst.res_uses.items():
-			for i, u1 in enumerate(uses):
-				for u2 in uses[i+1:]:
-					op1 = u1.op
-					op2 = u2.op
+				z1 = self.optim_obj1(m)
+				print('r', i, z1)
 
-				if op1.train_idx == op2.train_idx:
-					continue
-
-				v1 = r_val[res, op1, op2]
-				v2 = r_val[res, op2, op1]
-
-				use_op1 = sum(f_val[prev1, op1] for prev1 in op1.prev) if op1.n_prev > 0 else 1
-				use_op2 = sum(f_val[prev2, op2] for prev2 in op2.prev) if op2.n_prev > 0 else 1
-
-				print((res, op1, op2), v1, v2, use_op1, use_op2)
-
-
-		print(f_val)
-		print(r_val)
-
-
+			else:
+				break
+			
+			non_bin_r = self.find_non_bin_var(m, 'r')
+			i += 1 
 
 
 if __name__ == '__main__':

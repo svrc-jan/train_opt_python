@@ -39,8 +39,6 @@ class Op:
 
 	obj: Obj|None		= None
 
-	start_obj: int|None = None
-
 	@cached_property
 	def n_succ(self) -> int:
 		return len(self.succ)
@@ -75,11 +73,17 @@ class Instance:
 	res_idx: Dict[str, int]
 	res_uses: Dict[int, List[Res_use]]
 	n_ops: List[int]
-	total_dur: int
+	
+	max_dur: int
+	max_train_dur: List[int]
+
+	n_ops: List[int]
+	n_train_ops: List[int]
+
 
 	def __init__(self, json_file: str):
 		self.parse_json(json_file)
-		self.calculate_dist()
+		self.calc_max_train_dur()
 
 	def parse_json(self, json_file: str) -> None:
 		with open(json_file, 'r') as fd:
@@ -136,7 +140,7 @@ class Instance:
 
 			self.ops.append(train_ops)
 
-		self.n_ops = [len(train_ops) for train_ops in self.ops]
+		self.n_train_ops = [len(train_ops) for train_ops in self.ops]
 
 		for obj_jsn in jsn['objective']:
 			if obj_jsn['type'] != 'op_delay':
@@ -148,55 +152,32 @@ class Instance:
 				increment	=obj_jsn.get('increment', 0)
 			)
 
-	def calculate_dist(self, train_idx=None):
-		if train_idx is None:
-			for idx in range(self.n_trains):
-				self.calculate_dist(train_idx=idx)
-			return
+	def calc_max_train_dur(self):
+		dur = {}
 
-		def djikstra(start_op: Op, backward=True):
+		def rec(op: Op):
+			if not op in dur:
+				if op.n_succ == 0:
+					dur[op] = op.dur
+				
+				else:
+					dur[op] = op.dur + max(rec(succ) for succ in op.succ)
 			
-			q = PriorityQueue()
-			cnt = count()
-			q.put((0, next(cnt), start_op))
+			return dur[op]
 
-			dist = { start_op.op_idx: 0 }
-
-			while not q.empty():
-				d, _, op = q.get()
-				if d > dist.get(op.op_idx, float('inf')):
-					continue
-
-				for n in (op.prev if backward else op.succ):
-					n_d = d + (n.dur if backward else op.dur)
-					if n_d < dist.get(n.op_idx, float('inf')):
-						dist[n.op_idx] = n_d
-						q.put((n_d, next(cnt), n))
-			
-			return dist
-		
-		for op in self.ops[train_idx]:
-			if op.obj is not None:
-				dist = djikstra(op)
-				for k, v in dist.items():
-					curr = self.ops[train_idx][k]
-					curr.start_obj = op.obj.threshold - v if curr.start_obj is None else \
-						min(curr.start_obj, op.obj.threshold - v)
-
-		
-		for op in self.ops[train_idx]:
-			if op.obj is not None:
-				dist = djikstra(op, backward=False)
-				for k, v in dist.items():
-					curr = self.ops[train_idx][k]
-					if curr.start_obj is None:
-						curr.start_obj = op.obj.threshold + v
-
-			
+		self.max_train_dur = [rec(self.ops[tr][0]) for tr in range(self.n_trains)]
 		
 	@cached_property
 	def n_trains(self) -> int:
 		return len(self.ops)
+	
+	@cached_property
+	def n_ops(self) -> int:
+		return sum(self.n_train_ops)
+	
+	@cached_property
+	def max_dur(self) -> int:
+		return sum(self.max_train_dur)
 
 	@cached_property
 	def n_res(self) -> int:
@@ -211,9 +192,7 @@ if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
 	print(data)
 	inst = Instance(data)
-	for tr in inst.ops:
-		for op in tr:
-			print(op, op.start_obj)
+	print(inst.max_train_dur)
 
 	
 		
