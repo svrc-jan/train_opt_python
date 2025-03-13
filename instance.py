@@ -2,8 +2,8 @@
 
 import json
 import sys
+import itertools
 
-from itertools import count
 from dataclasses import dataclass, field
 from queue import PriorityQueue
 from typing import List, Tuple, Dict
@@ -187,6 +187,9 @@ class Instance:
 	def avg_dur(self) -> float:
 		return self.total_dur/sum(self.n_ops)
 	
+	@property
+	def all_ops(self):
+		return itertools.chain(*self.ops)
 
 if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
