@@ -8,32 +8,27 @@ import numpy as np
 
 from typing import List, Tuple, Dict, Set
 from instance import Instance, Op, Res_use
-from dataclasses import dataclass, field
 
-class Model:
-	def __init__(self):
-		pass
-	
-	@staticmethod
-	def set_obj(m):
-		u = m.data['u']
-		c = m.data['obj_coef']
 
-		m.setObjective(scip.quicksum(c[k]*u[k] for k in u.keys()), sense='minimize')
-		
+class Model(scip.Model):
+	def __init__(self, inst):
+		super().__init__()
+		self.make_init_model(self, inst)
+
 	@staticmethod
 	def get_values(m, var, to_int=False):
 		if isinstance(var, (list, tuple)):
 			return tuple(Model.get_values(m, v, to_int) for v in var)
 		
+		best_sol = m.getBestSol()
 
 		var = m.data[var]
 
 		if isinstance(var, dict):
 			if to_int:
-				rv =  { k: int(round(m.getVal(v))) for k, v in var.items() }
+				rv =  { k: int(round(m.getSolVal(best_sol, v))) for k, v in var.items() }
 			else:
-				rv =  { k: m.getVal(v) for k, v in var.items() }
+				rv =  { k: m.getSolVal(best_sol, v) for k, v in var.items() }
 		else:
 			if to_int:
 				rv = int(round(m.getVal(var)))
@@ -41,6 +36,7 @@ class Model:
 				rv = m.getVal(var)
 
 		return rv 
+
 
 	@staticmethod
 	def make_op_vars(m, op: Op):
@@ -59,8 +55,13 @@ class Model:
 		# o[op] = m.addVar(name=f'e{op}', vtype='C', lb=0, ub=None)
 
 		for succ in op.succ:
-			vtype = 'B' if op.n_succ > 1 else 'C'
+			vtype = 'C' if op.n_succ == 1 else 'B'
+			# vtype = 'C' if (op.n_succ == 1 or is_heur) else 'B'
 			f[op, succ] = m.addVar(name=f'f{op},{succ}', vtype=vtype, lb=0, ub=1)
+		
+		# if op.n_succ > 1:
+		# 	m.addConsSOS1(name=f'sos1{op}', vars=[f[op, succ] for succ in op.succ],
+		# 		initial=False, enforce=False, check=False)
 
 	@staticmethod
 	def make_dur_cons(m, op: Op):
@@ -90,7 +91,6 @@ class Model:
 		for succ in op.succ:
 			cons = e[op] == s[succ]
 			m.addCons(name=f'end{op},{succ}', cons=cons)
-
 
 
 	@staticmethod
@@ -128,3 +128,34 @@ class Model:
 		m.data['u'] = u
 		m.data['v'] = v
 		m.data['obj_coef'] = c
+
+
+	@staticmethod
+	def set_obj(m):
+		u = m.data['u']
+		c = m.data['obj_coef']
+
+		m.setObjective(scip.quicksum(c[k]*u[k] for k in u.keys()), sense='minimize')
+
+
+	@staticmethod
+	def make_init_model(m, inst: Instance):
+		m.data = {}
+
+		for op in inst.all_ops:
+			Model.make_op_vars(m, op)
+
+		for op in inst.all_ops:
+			Model.make_dur_cons(m, op)
+
+		for op in inst.all_ops:
+			Model.make_end_cons(m, op)
+	
+		for op in inst.all_ops:
+			Model.make_flow_cons(m, op)
+
+		Model.make_obj_vars(m, inst.all_ops)
+
+		Model.set_obj(m)
+		
+		return m

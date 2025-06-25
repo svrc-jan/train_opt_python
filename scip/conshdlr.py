@@ -8,19 +8,18 @@ import numpy as np
 
 from typing import List, Tuple, Dict, Set
 from instance import Instance, Op, Res_use
-from dataclasses import dataclass, field
-
-
-DEFAUL_DATA = 'data/testing/headway1.json'
-# DEFAUL_DATA = 'data/phase1/line1_critical_0.json'
-
 
 class Res_conshdlr(scip.Conshdlr):
+	def __init__(self, model, res_uses, max_train_dur):
+		super().__init__()
+		self.model = model
+		self.res_uses = res_uses
+		self.max_train_dur = max_train_dur
+
 	def get_res_collisions(self, solution):
 		eps = 1e-5
 
 		model = self.model
-		solver = self.solver
 
 		s = model.data['s']
 		e = model.data['e']
@@ -30,12 +29,12 @@ class Res_conshdlr(scip.Conshdlr):
 
 		used = {}
 
-		for res_idx, res_uses in solver.inst.res_uses.items():
+		for res_idx, res_uses in self.res_uses.items():
 			for i, ru1 in enumerate(res_uses):
 				op1 = ru1.op
 				if not op1 in used:
-					used[op1] = op1.n_succ == 0 or \
-						sum(model.getSolVal(solution, f[op1, succ1]) for succ1 in op1.succ) > eps
+					used[op1] = (op1.n_succ == 0) or \
+						(sum(model.getSolVal(solution, f[op1, succ1]) for succ1 in op1.succ) >= 1 - eps)
 				
 				if not used[op1]:
 					continue
@@ -50,8 +49,8 @@ class Res_conshdlr(scip.Conshdlr):
 						continue
 
 					if not op2 in used:
-						used[op2] = op2.n_succ == 0 or \
-							sum(model.getSolVal(solution, f[op2, succ2]) for succ2 in op2.succ) > eps
+						used[op2] = (op2.n_succ == 0) or \
+							(sum(model.getSolVal(solution, f[op2, succ2]) for succ2 in op2.succ) >= 1 - eps)
 				
 					if not used[op2]:
 						continue
@@ -64,10 +63,18 @@ class Res_conshdlr(scip.Conshdlr):
 
 		return collisions
 
+	# s1 <= smax
+ 	# s2 <= smax
+	# 
+	# emin <= e1
+	# emin <= e2
+	# 
+	# emin <= smax
+
 	def make_res_cons(self, collision):
 		model = self.model
-		inst = self.solver.inst
 
+		
 		s = model.data['s']
 		e = model.data['e']
 		f = model.data['f']
@@ -77,27 +84,36 @@ class Res_conshdlr(scip.Conshdlr):
 
 		op1 = ru1.op
 		op2 = ru2.op
-		
-		v1 = model.addVar(name=f'r{res_idx},{op1},{op2}', vtype='B')
-		v2 = model.addVar(name=f'r{res_idx},{op2},{op1}', vtype='B')
-
-		r[res_idx, op1, op2] = v1
-		r[res_idx, op2, op1] = v2
 
 		use_op1 = scip.quicksum(f[op1, succ1] for succ1 in op1.succ) if op1.n_succ > 0 else 1
 		use_op2 = scip.quicksum(f[op2, succ2] for succ2 in op2.succ) if op2.n_succ > 0 else 1
 
-		cons = 2*(v1 + v2) == use_op1 + use_op2
-		model.addCons(name=f'ch{res_idx},{op1},{op2}', cons=cons)
+		M1 = max(self.max_train_dur[op1.train_idx],	self.max_train_dur[op2.train_idx])
 
-		M1 = inst.max_train_dur[op1.train_idx] + \
-			 inst.max_train_dur[op2.train_idx]
+		k1 = (res_idx, op1, op2)
+		k2 = (res_idx, op2, op1)
+
+		if not k1 in r:
+			r[k1] = model.addVar(name=f'r{res_idx},{op1},{op2}', vtype='B')
+		
+		v1 = r[k1]
+		
+		if not k2 in r:
+			r[k2] = model.addVar(name=f'r{res_idx},{op2},{op1}', vtype='B')
+
+		v2 = r[k2]
+
+		cons = v1 + v2 == 1
+		model.addCons(name=f'ch{res_idx},{op1},{op2}', cons=cons, 
+			removable=True)		
 
 		cons1 = e[op1] + ru1.time <= s[op2] + M1*(1 - v1)
 		cons2 = e[op2] + ru2.time <= s[op1] + M1*(1 - v2)
 		
-		model.addCons(name=f'res{res_idx},{op1},{op2}', cons=cons1, removable=True)
-		model.addCons(name=f'res{res_idx},{op2},{op1}', cons=cons2, removable=True)
+		model.addCons(name=f'res{res_idx},{op1},{op2}', cons=cons1,
+			modifiable=True, removable=True)
+		model.addCons(name=f'res{res_idx},{op2},{op1}', cons=cons2, 
+			modifiable=True, removable=True)
 
 	def make_conss_from_collisions(self, collisions):
 		model = self.model
@@ -110,7 +126,7 @@ class Res_conshdlr(scip.Conshdlr):
 
 	def conscheck(self, constraints, solution, checkintegrality, checklprows, printreason, completely):
 		collisions = self.get_res_collisions(solution)
-
+	
 		if len(collisions) == 0:
 			return {"result": scip.SCIP_RESULT.FEASIBLE}
 		
@@ -118,13 +134,23 @@ class Res_conshdlr(scip.Conshdlr):
 
 	def consenfolp(self, constraints, nusefulconss, solinfeasible):
 		collisions = self.get_res_collisions(solution=None)
-		# print(collisions)
+		# print(nusefulconss, constraints)
+		print('enf lp')
 		if len(collisions) == 0:
 			return {"result": scip.SCIP_RESULT.FEASIBLE}
 		
 		self.make_conss_from_collisions(collisions)
 		return {"result": scip.SCIP_RESULT.CONSADDED}
-			
+	
+	def consenfops(self, constraints, nusefulconss, solinfeasible, objinfeasible):
+		collisions = self.get_res_collisions(solution=None)
+		print('enf pseudo')
+		if len(collisions) == 0:
+			return {"result": scip.SCIP_RESULT.FEASIBLE}
+		
+		self.make_conss_from_collisions(collisions)
+		return {"result": scip.SCIP_RESULT.CONSADDED}
+
 
 	def conslock(self, constraint, locktype, nlockspos, nlocksneg):
 		pass

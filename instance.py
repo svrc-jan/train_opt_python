@@ -16,7 +16,6 @@ class Res:
 	idx: int
 	time: int
 
-
 @dataclass
 class Obj:
 	threshold: int	= 0
@@ -28,6 +27,7 @@ class Obj:
 class Op:
 	train_idx: int	= -1
 	op_idx: int		= -1
+	# ident: int		= field(default_factory=itertools.count().__next__)
 
 	dur: int		= 0
 	start_lb: int	= 0
@@ -56,6 +56,7 @@ class Op:
 		return (self.train_idx, self.op_idx)
 
 	def __hash__(self) -> int:
+		# return self.ident
 		return hash(self.idx)
 
 	def __repr__(self) -> str:
@@ -151,6 +152,10 @@ class Instance:
 				coeff		=obj_jsn.get('coeff', 0),
 				increment	=obj_jsn.get('increment', 0)
 			)
+
+		for op in self.all_ops:
+			if op.obj:
+				assert((op.obj.coeff == 0) != (op.obj.increment == 0))
 
 	def calc_max_train_dur(self):
 		dur = {}
