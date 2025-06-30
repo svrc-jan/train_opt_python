@@ -7,7 +7,7 @@ import itertools
 from dataclasses import dataclass, field
 from queue import PriorityQueue
 from typing import List, Tuple, Dict
-from functools import cached_property
+from functools import cached_property, cache
 
 DEFAULT_DATA = 'data/testing/headway1.json'
 
@@ -24,10 +24,27 @@ class Obj:
 
 
 @dataclass
+class Point:
+	train_idx: int = -1
+	point_idx: int = -1
+	ops_in: List['Op']	= field(default_factory=list)
+	ops_out: List['Op'] = field(default_factory=list)
+
+	@cached_property
+	def idx(self) -> int:
+		return (self.train_idx, self.point_idx)
+
+	def __hash__(self) -> int:
+		return hash(self.idx)
+
+	def __repr__(self) -> str:
+		return f'Point({self.train_idx}, {self.point_idx})'
+
+
+@dataclass
 class Op:
 	train_idx: int	= -1
 	op_idx: int		= -1
-	# ident: int		= field(default_factory=itertools.count().__next__)
 
 	dur: int		= 0
 	start_lb: int	= 0
@@ -38,6 +55,10 @@ class Op:
 	res: List[Res]		= field(default_factory=list)
 
 	obj: Obj|None		= None
+
+	p_start: Point|None = None
+	p_end: Point|None   = None
+
 
 	@cached_property
 	def n_succ(self) -> int:
@@ -56,7 +77,6 @@ class Op:
 		return (self.train_idx, self.op_idx)
 
 	def __hash__(self) -> int:
-		# return self.ident
 		return hash(self.idx)
 
 	def __repr__(self) -> str:
@@ -68,28 +88,26 @@ class Res_use:
 	op: Op
 	time: int
 
-
 class Instance:
 	ops: List[List[Op]]
+	points: List[List[Point]]
+
 	res_idx: Dict[str, int]
 	res_uses: Dict[int, List[Res_use]]
-	n_ops: List[int]
 	
 	max_dur: int
 	max_train_dur: List[int]
 
-	n_ops: List[int]
 	n_train_ops: List[int]
 
 
 	def __init__(self, json_file: str):
 		self.parse_json(json_file)
-		self.calc_max_train_dur()
+		self.generate_points()
 
 	def parse_json(self, json_file: str) -> None:
 		with open(json_file, 'r') as fd:
 			jsn = json.load(fd)
-
 
 		self.ops = []
 		self.res_idx = {}
@@ -157,20 +175,39 @@ class Instance:
 			if op.obj:
 				assert((op.obj.coeff == 0) != (op.obj.increment == 0))
 
-	def calc_max_train_dur(self):
-		dur = {}
 
-		def rec(op: Op):
-			if not op in dur:
-				if op.n_succ == 0:
-					dur[op] = op.dur
-				
+	def generate_points(self):
+		self.points = []
+		for t_idx, t_ops in enumerate(self.ops):
+			t_points = [Point(
+				train_idx=t_idx,
+				point_idx=0,
+				ops_out=[t_ops[0]],
+				ops_in=[]
+			)]
+
+			for op in t_ops:
+				p = next((x for x in t_points if x.ops_out == op.succ), None)
+				if p:
+					op.p_end = p
+					p.ops_in.append(op)
 				else:
-					dur[op] = op.dur + max(rec(succ) for succ in op.succ)
-			
-			return dur[op]
+					t_points.append(Point(
+						train_idx=t_idx,
+						point_idx=len(t_points),
+						ops_out=op.succ,
+						ops_in=[op]
+					))
 
-		self.max_train_dur = [rec(self.ops[tr][0]) for tr in range(self.n_trains)]
+					op.p_end = t_points[-1]
+			
+			for p in t_points:
+				for op in p.ops_out:
+					assert(op.p_start is None)
+					op.p_start = p
+
+			self.points.append(t_points)				
+
 		
 	@cached_property
 	def n_trains(self) -> int:
@@ -196,11 +233,67 @@ class Instance:
 	def all_ops(self):
 		return itertools.chain(*self.ops)
 
+
+	@staticmethod
+	@cache
+	def get_res_inter(op1, op2):
+		r1 = [x.idx for x in op1.res]
+		r2 = [x.idx for x in op2.res]
+
+		return [x for x in r1 if x in r2]
+	
+	@staticmethod
+	@cache
+	def get_res_diff(op1, op2):
+		if not op1:
+			return []
+		
+		r1 = [x.idx for x in op1.res]
+		if not op2:
+			return r1
+
+		r2 = [x.idx for x in op2.res]
+
+		return [x for x in r1 if x not in r2]
+		
+	
+	def verify_order(self, order: List[Op]):
+		prev_op = [None]*self.n_trains
+		res_vec = [1]*self.n_res
+
+		for op in order:
+			if op.n_prev > 0:
+				assert(not prev_op[op.train_idx] is None)
+				assert(prev_op[op.train_idx] in op.prev)
+
+				for res in prev_op[op.train_idx].res:
+					assert(res_vec[res.idx] == 0)
+					res_vec[res.idx] += 1
+			
+			else:
+				assert(prev_op[op.train_idx] is None)
+			
+			for res in op.res:
+				if res_vec[res.idx] != 1:
+					print(f'locked resource {res.idx} for {op}')
+					return False
+				res_vec[res.idx] -= 1
+			
+			prev_op[op.train_idx] = op
+
+
 if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
 	print(data)
 	inst = Instance(data)
-	print(inst.max_train_dur)
+
+	for t_idx, t_points in enumerate(inst.points):
+		print(f'train {t_idx},  points: {len(t_points)}, ops: {inst.n_train_ops[t_idx]}')
+		for p in t_points:
+			print(f'  {p}, in: {p.ops_in}, out: {p.ops_out}')
+
+	# for t_idx in range(inst.n_trains):
+	# 	print('tr')
 
 	
 		
