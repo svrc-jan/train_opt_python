@@ -27,8 +27,18 @@ class Obj:
 class Point:
 	train_idx: int = -1
 	point_idx: int = -1
+
+	start_lb: int 		= 0
+	start_ub: int|None 	= None
+
+	obj = None
+
 	ops_in: List['Op']	= field(default_factory=list)
 	ops_out: List['Op'] = field(default_factory=list)
+
+	res_lock: Dict[int, List['Op']] 	= field(default_factory=dict)
+	res_unlock: Dict[int, List['Op']] 	= field(default_factory=dict)
+
 
 	@cached_property
 	def idx(self) -> int:
@@ -82,6 +92,8 @@ class Op:
 	def __repr__(self) -> str:
 		return f'Op({self.train_idx}, {self.op_idx})'
 
+	def __lt__(self, other):
+		return self.idx < other.idx
 
 @dataclass
 class Res_use:
@@ -206,9 +218,46 @@ class Instance:
 					assert(op.p_start is None)
 					op.p_start = p
 
-			self.points.append(t_points)				
 
-		
+			for op in t_ops:
+				for res in op.res:
+					op.p_start.res_lock.setdefault(res.idx, []).append(op)
+					op.p_end.res_unlock.setdefault(res.idx, []).append(op)
+				
+
+			for p in t_points:
+				p.ops_in.sort()
+				p.ops_out.sort()
+
+				for lock_ops in p.res_lock.values():
+					lock_ops.sort()
+
+				for unlock_ops in p.res_unlock.values():
+					unlock_ops.sort()
+
+				for res_idx, lock_ops in list(p.res_lock.items()):
+					if res_idx in p.res_unlock:
+						unlock_ops = p.res_lock[res_idx]
+						if lock_ops == p.ops_in and unlock_ops == p.ops_out:
+							del p.res_lock[res_idx]
+							del p.res_unlock[res_idx]
+
+
+			self.points.append(t_points)				
+	
+
+			for p in itertools.chain(*self.points):
+				if p.ops_out:
+					assert(all(x.start_ub == p.ops_out[0].start_ub for x in p.ops_out))
+
+					assert(all(x.start_lb == p.ops_out[0].start_lb for x in p.ops_out))
+				
+					assert(all(x.obj == p.ops_out[0].obj for x in p.ops_out))
+	
+				for op in p.ops_out:
+					assert(p.point_idx < op.p_end.point_idx)
+
+
 	@cached_property
 	def n_trains(self) -> int:
 		return len(self.ops)
@@ -233,6 +282,9 @@ class Instance:
 	def all_ops(self):
 		return itertools.chain(*self.ops)
 
+	@property
+	def all_points(self):
+		return itertools.chain(*self.points)
 
 	@staticmethod
 	@cache
@@ -290,7 +342,7 @@ if __name__ == '__main__':
 	for t_idx, t_points in enumerate(inst.points):
 		print(f'train {t_idx},  points: {len(t_points)}, ops: {inst.n_train_ops[t_idx]}')
 		for p in t_points:
-			print(f'  {p}, in: {p.ops_in}, out: {p.ops_out}')
+			print(f'  {p}, in: {p.ops_in}, out: {p.ops_out}, lock: {p.res_lock}, unlock: {p.res_unlock}')
 
 	# for t_idx in range(inst.n_trains):
 	# 	print('tr')
