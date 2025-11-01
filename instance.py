@@ -56,11 +56,11 @@ class Instance:
 	__res_name_idx: Dict[str, int]
 
 	def __init__(self, jsn_file: str):
-
 		self.parse_json_file(jsn_file)
 
 
 	def parse_json_file(self, jsn_file: str):
+		self.trains = []
 		self.__res_name_idx = {}
 
 		with open(jsn_file, 'r') as fd:
@@ -76,11 +76,13 @@ class Instance:
 		for jsn_op in jsn_train:
 			self.parse_json_op(jsn_op, train)
 
+		self.trains.append(train)
+
 
 	def parse_json_op(self, jsn_op: dict, train: Train):
 		op = Op(idx=len(train.ops), train=train.idx)
 
-		op.dur = jsn_op['dur']
+		op.dur = jsn_op['min_duration']
 		op.start_lb = jsn_op.get('start_lb', 0)
 		op.start_ub = jsn_op.get('start_ub', MAX_DUR)
 
@@ -89,13 +91,27 @@ class Instance:
 		for jsn_res in jsn_op.get('resources', []):
 			res = Res(
 				idx=self.get_res_idx(jsn_res['resource']),
-				time=jsn_res['release_time'])
+				time=jsn_res.get('release_time', 0)
+			)
 			
 			op.res.append(res)
 
 		train.ops.append(op)
 
-	
+
+	def parse_json_obj(self, jsn_obj):
+		if jsn_obj['type'] != 'op_delay':
+			return
+		
+		obj = Obj(
+			threshold	=jsn_obj.get('threshold', 0),
+			coeff		=jsn_obj.get('coeff', 0),
+			increment	=jsn_obj.get('increment', 0)
+		)
+
+		self.trains[jsn_obj['train']].obs[jsn_obj['operation']].obj = obj
+
+
 	def get_res_idx(self, name):
 		idx = self.__res_name_idx.get(name, -1)
 		
