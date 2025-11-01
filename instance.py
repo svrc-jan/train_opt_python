@@ -36,25 +36,12 @@ class Op:
 
 	obj: Obj|None = None
 
-	point_start: int = -1
-	point_end: int = -1
-
-
-@dataclass
-class Point:
-	idx: int = -1
-	train: int = -1
-
-	ops_out: List[int] = field(default_factory=list)
-	ops_in: List[int] = field(default_factory=list)
 
 @dataclass
 class Train:
 	idx: int = -1
 
 	ops: List[Op] = field(default_factory=list)
-	points: List[Point] = field(default_factory=list)
-
 
 class Instance:
 	trains: List[Train]
@@ -65,7 +52,6 @@ class Instance:
 	def __init__(self, jsn_file: str):
 		self.parse_json_file(jsn_file)
 		self.make_prev_ops()
-		self.make_points()
 
 
 	def parse_json_file(self, jsn_file: str):
@@ -130,33 +116,6 @@ class Instance:
 				for succ in op.succ:
 					train.ops[succ].prev.append(op.idx)
 
-
-	def make_points(self):
-		for train in self.trains:
-			point = Point(
-				idx=0,
-				train=train.idx,
-				ops_out=[0]
-			)
-
-			train.points.append(point)
-			d_out_ops = { hash(point.ops_out) : point.idx }
-
-			for op in train.ops:
-				idx = d_out_ops.get(hash(op.succ), -1)
-				
-				if idx == -1:
-					point = Point(
-						idx=len(train.points),
-						train=train.idx,
-						ops_out=op.succ
-					)
-
-					train.points.append(point)
-					d_out_ops = { hash(point.ops_out) : point.idx }
-
-				assert(train.points[idx].ops_out == op.succ)
-				op.point_end = idx
 
 	def get_res_idx(self, name):
 		idx = self.__res_name_idx.get(name, -1)
