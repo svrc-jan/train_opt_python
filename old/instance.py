@@ -115,7 +115,7 @@ class Instance:
 
 	def __init__(self, json_file: str):
 		self.parse_json(json_file)
-		self.generate_points()
+		# self.generate_points()
 
 	def parse_json(self, json_file: str) -> None:
 		with open(json_file, 'r') as fd:
