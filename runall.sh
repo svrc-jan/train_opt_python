@@ -6,13 +6,7 @@ do
     $command "$file"
 done
 
-for file in data/phase1/*
-do
-    echo $file
-    $command "$file"
-done
-
-for file in data/phase2/*
+for file in data/*
 do
     echo $file
     $command "$file"
