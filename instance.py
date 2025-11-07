@@ -6,7 +6,7 @@ import json
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import List, Dict, NamedTuple
+from typing import List, Dict, Set, NamedTuple
 
 import networkx as nx
 
@@ -69,7 +69,8 @@ class Train:
 	ops: List[Op] = field(default_factory=list)
 	max_dur: int = MAX_DUR
 	res_to_op: Dict[int, List[int]] = field(default_factory=lambda: defaultdict(list))
-	avoidable_res: List[int] = field(default_factory=list)
+	avoidable_res: Set[int] = field(default_factory=set)
+	
 
 	@cached_property
 	def n_ops(self):
@@ -209,7 +210,7 @@ class Instance:
 
 	def calculate_avoidable_resources(self):
 		for train in self.trains:
-			train.avoidable_res = [r for r in train.res if self.is_resource_avoidable(train, r)]
+			train.avoidable_res = set(r for r in train.res if self.is_resource_avoidable(train, r))
 
 
 	def is_resource_avoidable(self, train: Train, res: int):

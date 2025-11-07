@@ -43,7 +43,7 @@ class Solver:
 	model: cp.CpModel
 	solver: cp.CpSolver
 
-	def __init__(self, inst: Instance, curr_sol: Solution = None, free: List[int] = [], semi: List[int] = [], fixed: List[int] = []):
+	def __init__(self, inst, curr_sol = None, free = [], semi = [], fixed = []):
 		self.inst = inst
 		self.curr_sol = curr_sol
 		
@@ -94,6 +94,8 @@ class Solver:
 			sol.events[t] = events
 
 		return sol
+
+
 
 	def create_op_vars(self):
 		self.var_op_used 	= {}
