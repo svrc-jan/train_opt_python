@@ -70,7 +70,7 @@ class Train:
 	max_dur: int = MAX_DUR
 	res_to_op: Dict[int, List[int]] = field(default_factory=lambda: defaultdict(list))
 	avoidable_res: Set[int] = field(default_factory=set)
-	
+
 
 	@cached_property
 	def n_ops(self):
@@ -85,6 +85,7 @@ class Instance:
 	trains: List[Train]
 	points_valid: bool
 	max_dur: int
+	res_occur: List[int]
 
 	__res_time: List[Dict[Op_idx, int]]
 	__res_name_idx: Dict[str, int]
@@ -92,8 +93,9 @@ class Instance:
 	def __init__(self, jsn_file: str):
 		self.parse_json_file(jsn_file)
 		self.make_prev_ops()
-		self.calculate_max_dur()
-		self.calculate_avoidable_resources()
+		self.make_max_dur()
+		self.make_avoidable_resources()
+		self.make_res_occur()
 
 
 	def parse_json_file(self, jsn_file: str):
@@ -119,6 +121,9 @@ class Instance:
 
 		self.trains.append(train)
 
+		# check if only last op is ending op (n_succ == 0), required for solver
+		for op in train.ops[:-1]:
+			assert(op.n_succ > 0)
 
 	def parse_json_op(self, jsn_op: dict, train: Train):
 		op = Op(idx=Op_idx(train=train.idx, op=len(train.ops)))
@@ -135,7 +140,9 @@ class Instance:
 			
 			op.res.append(res_idx)
 			train.res_to_op[res_idx].append(op.i)
-			self.__res_time[res_idx][op.idx] = res_time
+
+			if res_time > 0:
+				self.__res_time[res_idx][op.idx] = res_time
 
 		train.ops.append(op)
 
@@ -171,9 +178,9 @@ class Instance:
 		return idx
 
 
-	def calculate_max_dur(self):
+	def make_max_dur(self):
 		for train in self.trains:
-			self.calculate_train_max_dur(train)
+			self.make_train_max_dur(train)
 		
 		self.max_dur = sum(t.max_dur for t in self.trains)
 
@@ -183,7 +190,7 @@ class Instance:
 					op.start_ub = self.max_dur - op.dur
 
 
-	def calculate_train_max_dur(self, train: Train):
+	def make_train_max_dur(self, train: Train):
 		n_prev = [op.n_prev for op in train.ops]
 		start = [0] * train.n_ops
 
@@ -208,7 +215,7 @@ class Instance:
 		train.max_dur = max(start[op.i] + op.dur for op in train.ops if op.n_succ == 0)
 
 
-	def calculate_avoidable_resources(self):
+	def make_avoidable_resources(self):
 		for train in self.trains:
 			train.avoidable_res = set(r for r in train.res if self.is_resource_avoidable(train, r))
 
@@ -233,17 +240,30 @@ class Instance:
 		return nx.has_path(g, 0, train.n_ops)	
 
 
+	def make_res_occur(self):
+		self.res_occur = [0] * self.n_res
+
+		for train in self.trains:
+			for op in train.ops:
+				for r in op.res:
+					self.res_occur[r] += 1
+
+
 	def op(self, idx: Op_idx) -> Op:
 		return self.trains[idx.train].ops[idx.op]
 	
 
 	def res_time(self, res_idx: int, op_idx: Op_idx, min_time: int = 0) -> int:
-		return min(self.__res_time[res_idx][op_idx], min_time)
+		return min(self.__res_time[res_idx].get(op_idx, 0), min_time)
 
 
 	@cached_property
 	def n_trains(self):
 		return len(self.trains)
+	
+	@cached_property
+	def n_res(self):
+		return len(self.__res_name_idx)
 
 if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA

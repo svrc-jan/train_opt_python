@@ -5,6 +5,7 @@ import sys
 from dataclasses import dataclass, field
 from collections import defaultdict
 from typing import List, Dict, NamedTuple
+from enum import Enum
 
 from ortools.sat.python import cp_model as cp
 
@@ -29,6 +30,12 @@ class Solution:
 	events: Dict[int, List[Event]] = field(default_factory=lambda: defaultdict(list))
 
 
+class Train_type(Enum):
+	FREE = 0
+	SEMI = 1
+	FIXED = 2
+
+
 class Solver:
 	inst: Instance
 	curr_sol: Solution
@@ -36,6 +43,8 @@ class Solver:
 	free: List[int]
 	semi: List[int]
 	fixed: List[int]
+
+	train_type: Dict[int, Train_type]
 
 	max_dur: int
 	res_used: Dict[int, List[int]]
@@ -51,6 +60,11 @@ class Solver:
 		self.semi = semi
 		self.fixed = fixed
 
+		self.train_type = 							\
+			{ t: Train_type.FREE for t in free} | 	\
+			{ t: Train_type.SEMI for t in semi} | 	\
+			{ t: Train_type.FIXED for t in fixed}
+
 		self.max_dur = sum(inst.trains[t].max_dur for t in free + semi + fixed)
 
 		self.model = cp.CpModel()
@@ -63,17 +77,19 @@ class Solver:
 		self.add_path_cons()
 		self.add_time_cons()
 		self.add_res_interval_cons()
+		self.add_hint()
 
 
-	def solve(self):
+	def solve(self, max_time=float('inf')):
 		self.solver.parameters.num_workers = 8
+		self.solver.parameters.max_time_in_seconds = max_time
 
 		status = self.solver.Solve(self.model)
 
 		if status == cp.INFEASIBLE:
-			return None
+			return False
 		
-		return self.get_solution()
+		return True
 
 
 	def get_solution(self) -> Solution:
@@ -94,7 +110,6 @@ class Solver:
 			sol.events[t] = events
 
 		return sol
-
 
 
 	def create_op_vars(self):
@@ -125,8 +140,6 @@ class Solver:
 				for r in op.res:
 					self.res_used[r].add(t)
 
-		print(self.res_used)
-
 
 	def create_res_vars(self):
 		self.var_res_lock 	= {}
@@ -136,7 +149,7 @@ class Solver:
 
 		for r, trains in self.res_used.items():
 			for t in trains:
-				if t in self.free:
+				if self.train_type[t] == Train_type.FREE:
 					self.var_res_lock[r, t] 	= self.model.NewIntVar(lb=0, ub=self.max_dur, name=f'lock_{r}_{t}')
 					self.var_res_unlock[r, t]	= self.model.NewIntVar(lb=0, ub=self.max_dur, name=f'unlock_{r}_{t}')
 					self.var_res_size[r, t]		= self.model.NewIntVar(lb=0, ub=self.max_dur, name=f'size_{r}_{t}')
@@ -191,7 +204,7 @@ class Solver:
 			interval_vars = []
 
 			for t in trains:
-				if t in self.free:
+				if self.train_type[t] == Train_type.FREE:
 					train = self.inst.trains[t]
 
 					for i in train.res_to_op[r]:
@@ -225,6 +238,54 @@ class Solver:
 				
 				
 			self.model.AddNoOverlap(interval_vars)
+
+
+	def add_hint(self):
+		if self.curr_sol is None:
+			return
+		
+		for t in self.free:
+			if not t in self.curr_sol.events:
+				continue
+			
+			prev = -1
+			for e in self.curr_sol.events[t]:
+				self.model.add_hint(self.var_op_used[e.idx], 1)
+
+				curr = e.idx.op
+				if prev >= 0:
+					self.model.add_hint(self.var_op_path[t, prev, curr], 1)
+				prev = curr
+
+		for t in self.free + self.semi:
+			if not t in self.curr_sol.events:
+				continue
+
+			for e in self.curr_sol.events[t]:
+				self.model.add_hint(self.var_op_start[e.idx], e.start)
+				self.model.add_hint(self.var_op_end[e.idx], e.end)
+
+
+	def add_res_obj(self):
+		self.model.minimize(sum(sum(
+			self.inst.res_occur[r]*self.var_res_used[r, t]
+			for r in self.inst.trains[t].avoidable_res)
+			for t in self.free))
+		
+
+	def add_time_obj(self):
+		self.model.minimize(sum(
+			self.var_op_start[self.inst.trains[t].ops[-1].idx] 
+			for t in self.free + self.semi))
+
+
+	def fix_path(self):
+		for t in self.free:
+			train = self.inst.trains[t]
+
+			for op in train.ops:
+				if round(self.solver.value(self.var_op_used[op.idx])) == 1:
+					self.model.add(self.var_op_used[op.idx] == 1)
 
 
 if __name__ == '__main__':
