@@ -97,7 +97,7 @@ class Heuristic:
 			g1 = self.train_to_group[col.op1.train] 
 			g2 = self.train_to_group[col.op2.train]
 
-			k = (g1, g2) if (g1 < g2) else (g2, g2)
+			k = (g1, g2) if (g1 < g2) else (g2, g1)
 
 			self.group_col_count[k] += 1
 
