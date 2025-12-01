@@ -2,14 +2,15 @@
 
 import sys
 
-
+from collections import defaultdict
 import gurobipy as gp
 
 from gurobipy import GRB
 
-from instance import Instance, Op
+from instance import Instance
 
 
+MAX_DUR = 100000
 DEFAULT_DATA = 'data/nor1_critical_0.json'
 
 class Model:
@@ -22,32 +23,35 @@ class Model:
 
 	
 	def build(self):
-		self.add_op_vars()
-		self.add_res_vars()
-		self.add_obj_var()
+		self.add_var_level_time()
+		self.add_var_op_used()
+		self.add_var_res()
+		self.add_var_obj()
+		
+		self.add_cons_dur()
+		self.add_cons_flow()
+		self.add_cons_res_interval()
+		self.add_cons_obj()
 
-		self.add_dur_cons()
-		self.add_flow_cons()
-		self.add_res_interval_cons()
-		self.add_threshold_cons()
 
-	
-	def add_op_vars(self):
-		self.var_op_start = {}
-		self.var_op_flow = {}
+	def add_var_level_time(self):
+		self.var_level_time = {}
+
+		for level in self.inst.levels:
+			self.var_level_time[level.idx] = self.gm.addVar(
+				lb=level.time_lb, ub=level.time_ub,
+				vtype=GRB.CONTINUOUS, name=f'level_time_{level.idx}')
+
+
+	def add_var_op_used(self):
+		self.var_op_used = {}
 
 		for op in self.inst.ops:
-			assert(op.start_lb <= op.start_ub)
-
-			self.var_op_start[op.idx] = self.gm.addVar(
-				lb=op.start_lb, ub=op.start_ub, vtype=GRB.CONTINUOUS, name=f'op_start_{op.idx}')
-			
-			for succ in op.succ:
-				self.var_op_flow[op.idx, succ] = self.gm.addVar(
-					vtype=GRB.BINARY, name=f'op_flow_{op.idx}_{succ}')
+			self.var_op_used[op.idx] = self.gm.addVar(
+				vtype=GRB.BINARY, name=f'op_used_{op.idx}')
 
 	
-	def add_res_vars(self):
+	def add_var_res(self):
 		self.var_res_lock = {}
 		self.var_res_unlock = {}
 		self.var_res_order = {}
@@ -55,95 +59,133 @@ class Model:
 		for train in self.inst.trains:
 			for r in train.res:
 				self.var_res_lock[r, train.idx] = self.gm.addVar(
-					lb=0, ub=inst.max_dur, vtype=GRB.CONTINUOUS, name=f'res_lock_{r}_{train.idx}')
+					lb=0, ub=MAX_DUR, vtype=GRB.CONTINUOUS, name=f'res_lock_{r}_{train.idx}')
 				
 				self.var_res_unlock[r, train.idx] = self.gm.addVar(
-					lb=0, ub=inst.max_dur, vtype=GRB.CONTINUOUS, name=f'res_lock_{r}_{train.idx}')
+					lb=0, ub=MAX_DUR, vtype=GRB.CONTINUOUS, name=f'res_unlock_{r}_{train.idx}')
 				
 	
-	def add_dur_cons(self):
-		M = self.inst.max_dur
-
-		start = self.var_op_start
-		flow = self.var_op_flow
+	def add_cons_dur(self):
+		level_time = self.var_level_time
+		op_used = self.var_op_used
 
 		for op in self.inst.ops:
-			if op.n_succ == 0:
-				pass
-			elif op.n_succ == 0:
-				self.gm.addConstr(start[op.idx] + op.dur <= start[op.succ[0]])
-			else:
-				for succ in op.succ:
-					self.gm.addConstr(start[op.idx] + op.dur <= start[succ] + M*(1 - flow[op.idx, succ]))
+			self.gm.addConstr(level_time[op.level_start] + op.dur*op_used[op.idx] <= level_time[op.level_end])
 		
 
-	def add_flow_cons(self):
-		flow = self.var_op_flow
+	def add_cons_flow(self):
+		op_used = self.var_op_used
 
-		for op in self.inst.ops:
-			if op.n_prev == 0:
-				self.gm.addConstr(sum(flow[op.idx, succ] for succ in op.succ) == 1)
+		for level in self.inst.levels:
+			if level.n_ops_in == 0:
+				self.gm.addConstr(sum(op_used[op_out] for op_out in level.ops_out) == 1)
 
-			elif op.n_succ == 0:
-				self.gm.addConstr(sum(flow[prev, op.idx] for prev in op.prev) == 1)
+			elif level.n_ops_out == 0:
+				self.gm.addConstr(sum(op_used[op_in] for op_in in level.ops_in) == 1)
 
 			else:
 				self.gm.addConstr(
-					sum(flow[op.idx, succ] for succ in op.succ) == 
-					sum(flow[prev, op.idx] for prev in op.prev))
+					sum(op_used[op_out] for op_out in level.ops_out) == 
+					sum(op_used[op_in] for op_in in level.ops_in))
 
 	
-	def add_res_interval_cons(self):
-		M = self.inst.max_dur
+	def add_cons_res_interval(self, min_res_time=1):
+		M = MAX_DUR
 
-		start = self.var_op_start
-		flow = self.var_op_flow
+		time = self.var_level_time
+		used = self.var_op_used
 		lock = self.var_res_lock
 		unlock = self.var_res_unlock
 
-		for train in self.inst.trains:
-			for r in train.res:
-				for idx in train.res_to_op[r]:
-					op = self.inst.ops[idx]
-
-					if op.n_succ > 0:
-						self.gm.addConstr(lock[r, train.idx] <= start[idx] + M*(1 - sum(flow[idx, succ] for succ in op.succ)))
-						for succ in op.succ:
-							self.gm.addConstr(unlock[r, train.idx] >= start[succ] + M*(1 - flow[idx, succ]))
-
-					else:
-						self.gm.addConstr(lock[r, train.idx] <= start[idx])
-						self.gm.addConstr(unlock[r, train.idx] >= start[idx] + op.dur)
+		for op in self.inst.ops:
+			for res in op.res:
+				self.gm.addConstr(lock[res.idx, op.train] <= time[op.level_start] + M*(1 - used[op.idx]))
+				self.gm.addConstr(time[op.level_end] + max(res.time, min_res_time)
+					<= unlock[res.idx, op.train] +  M*(1 - used[op.idx]))
 
 
-	def add_obj_var(self):
+	def add_var_obj(self):
 		self.var_obj = {}
 
 		for op in self.inst.ops:
 			if op.obj:
-				if op.obj.coeff > 0:
-					self.var_obj[op.idx] = self.gm.addVar(
-						lb=0, ub=self.inst.max_dur, obj=op.obj.coeff, vtype=GRB.CONTINUOUS, name=f'obj_{op.idx}')
-				elif op.obj.threshold > 0:
-					self.var_obj[op.idx] = self.gm.addVar(
-						obj=op.obj.threshold, vtype=GRB.BINARY, name=f'obj_bin_{op.idx}')
+				if op.obj.is_bin:
+					self.var_obj[op.idx] = self.gm.addVar(vtype=GRB.BINARY, name=f'obj_bin_{op.idx}')
+				else:
+					self.var_obj[op.idx] = self.gm.addVar(lb=0, ub=MAX_DUR,	vtype=GRB.CONTINUOUS, name=f'obj_{op.idx}')
 					
 		
-	def add_threshold_cons(self):
-		M = self.inst.max_dur
+	def add_cons_obj(self):
+		M = MAX_DUR
 
-		start = self.var_op_start
+		time = self.var_level_time
+		used = self.var_op_used
 
 		for op in self.inst.ops:
 			if op.obj:
-				if op.obj.coeff > 0:
-					self.gm.addConstr(start[op.idx] - op.obj.threshold <= self.var_obj[op.idx])
+				if op.obj.is_bin:
+					self.gm.addConstr(time[op.level_start] - op.obj.time <= 
+						M*self.var_obj[op.idx] + M*(1 - used[op.idx]))
+				else:
+					self.gm.addConstr(time[op.level_start] - op.obj.time <= 
+					   	self.var_obj[op.idx] + M*(1 - used[op.idx]))
 
-				elif op.obj.threshold > 0:
-					self.gm.addConstr(start[op.idx] - op.obj.threshold <= M*self.var_obj[op.idx])
+	
+	def set_inst_obj(self):
+		self.gm.setObjective(sum(self.var_obj[op.idx]*op.obj.value for op in self.inst.ops if not op.obj is None))
 
 
-	def g
+	def add_cons_res_overlap(self, res, train1, train2):
+		M = MAX_DUR
+
+		order = self.var_res_order
+		lock = self.var_res_lock
+		unlock = self.var_res_unlock
+
+		if train1 > train2:
+			train1, train2 = train2, train1
+
+		k = (res, train1, train2)
+
+		if k in order:
+			print(f'cond1: {unlock[res, train1].X:.3f} <= {lock[res, train2].X:.3f} + {M*(1 - order[k].X):.3f}')
+			print(f'cond2: {lock[res, train1].X:.3f} <= {unlock[res, train2].X:.3f} + {M*order[k].X:.3f}')
+
+			exit(-1)
+
+		order[k] = self.gm.addVar(vtype=GRB.BINARY, name=f'res_order_{res}_{train1}_{train2}')
+		
+		self.gm.addConstr(unlock[res, train1] <= lock[res, train2] + M*(1 - order[k]))
+		self.gm.addConstr(unlock[res, train2] <= lock[res, train1] + M*order[k])
+
+		
+	def get_result_res_uses(self):
+		used = self.var_op_used
+		time = self.var_level_time
+
+		res_uses = defaultdict(dict)
+		for op in self.inst.ops:
+			if used[op.idx].X > 0.5:
+				op_start = time[op.level_start].X
+				op_end = time[op.level_end].X
+
+				for res in op.res:
+					op_release = op_end + res.time
+					if op.train in res_uses[res.idx]:
+						res_start, res_end = res_uses[res.idx][op.train]
+						res_uses[res.idx][op.train] = (min(op_start, res_start), max(op_release, res_end))
+					else:
+						res_uses[res.idx][op.train] = (op_start, op_release)
+
+
+		res_uses = { res: [(t1, t2, train) for train, (t1, t2) in ru.items()] for (res, ru) in res_uses.items() }
+
+		
+		for ru in res_uses.values():
+			ru.sort()
+		
+		return res_uses
+
 
 if __name__ == '__main__':
 	data = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_DATA
@@ -151,5 +193,7 @@ if __name__ == '__main__':
 	inst = Instance(data)
 	model = Model(inst)
 	model.build()
+	model.set_inst_obj()
 	model.gm.write('model.mps')
 	model.gm.optimize()
+	print(model.get_result_res_uses())
